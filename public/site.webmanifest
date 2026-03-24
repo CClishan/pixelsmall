@@ -1,0 +1,17 @@
+{
+  "name": "PixelSmall",
+  "short_name": "PixelSmall",
+  "description": "Compress images and scanned PDFs directly in the browser.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fcfcfc",
+  "theme_color": "#09090b",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "128x128",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="630" fill="#FCFCFC"/>
+  <rect x="36" y="36" width="1128" height="558" rx="36" fill="#FFFFFF" stroke="#E4E4E7"/>
+  <rect x="72" y="72" width="1056" height="486" rx="28" fill="#FAFAFA"/>
+  <rect x="88" y="88" width="1024" height="454" rx="24" fill="#FFFFFF" stroke="#F4F4F5"/>
+
+  <rect x="120" y="120" width="84" height="84" rx="24" fill="#09090B"/>
+  <path d="M149 179V145H164C173.389 145 179 150.148 179 158.2C179 166.182 173.389 171.2 164 171.2H156V179H149ZM156 165.2H163.28C168.538 165.2 171.8 162.538 171.8 158.2C171.8 153.793 168.538 151 163.28 151H156V165.2Z" fill="#FAFAFA"/>
+
+  <text x="228" y="162" fill="#09090B" font-family="Inter, Arial, sans-serif" font-size="50" font-weight="800">PixelSmall</text>
+  <text x="228" y="212" fill="#71717A" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="600">Browser-side image &amp; scanned PDF compression</text>
+
+  <text x="120" y="310" fill="#09090B" font-family="Inter, Arial, sans-serif" font-size="66" font-weight="800">Compress uploads on the</text>
+  <text x="120" y="386" fill="#09090B" font-family="Inter, Arial, sans-serif" font-size="66" font-weight="800">user's own device.</text>
+
+  <text x="120" y="454" fill="#71717A" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="500">No backend file storage by default. Built for Vercel deployment with a local-first compression flow.</text>
+
+  <rect x="120" y="490" width="192" height="24" rx="12" fill="#F4F4F5"/>
+  <rect x="328" y="490" width="176" height="24" rx="12" fill="#F4F4F5"/>
+  <rect x="520" y="490" width="220" height="24" rx="12" fill="#F4F4F5"/>
+
+  <rect x="810" y="172" width="248" height="166" rx="26" fill="#FAFAFA" stroke="#E4E4E7"/>
+  <text x="842" y="225" fill="#71717A" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="700">READY IN THE BROWSER</text>
+  <text x="842" y="275" fill="#09090B" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="800">Images, ZIP bundles,</text>
+  <text x="842" y="307" fill="#09090B" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="800">and scanned PDFs.</text>
+
+  <rect x="810" y="360" width="248" height="130" rx="26" fill="#09090B"/>
+  <text x="842" y="414" fill="#FAFAFA" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700">LOCAL-FIRST</text>
+  <text x="842" y="454" fill="#D4D4D8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="600">Queue, compress,</text>
+  <text x="842" y="484" fill="#D4D4D8" font-family="Inter, Arial, sans-serif" font-size="22" font-weight="600">download, done.</text>
+</svg>
