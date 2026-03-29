@@ -1,97 +1,92 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Plus,
-  Image as ImageIcon,
-  FileText,
-  X,
-  Download,
-  Trash2,
-  Settings,
-  Layers,
-  AlertCircle,
-  CheckCircle2,
-  Loader2,
-  GripVertical,
   Archive,
-  Zap,
+  ChevronDown,
+  Download,
+  Loader2,
+  Settings2,
 } from "lucide-react";
-import { AnimatePresence, motion, Reorder } from "motion/react";
-import JSZip from "jszip";
+import type { QueuedFile, ToastState, WorkspaceKind } from "@/app-types";
+import { FileDropzone } from "@/components/FileDropzone";
+import { QueueList } from "@/components/QueueList";
+import { ToastRegion } from "@/components/ToastRegion";
+import { WorkspaceTabs } from "@/components/WorkspaceTabs";
 import {
-  compressImageFile,
-  compressPdfFile,
-  estimatePdfPages,
-  type ImageOutputFormat,
+  type CompressionPreset,
+  type ImageOutputPreference,
+  type ImageWorkspaceState,
+  type PdfCompressionInput,
+  type PngCompressionMode,
 } from "@/lib/compression";
+import {
+  clearedWorkspaceLabel,
+  compressionFinishedLabel,
+  formatTemplate,
+  getCopy,
+  getInitialLocale,
+  message,
+  noCompletedToDownloadLabel,
+  noPendingLabel,
+  pageReadyLabel,
+  persistLocale,
+  rawMessage,
+  type Locale,
+  type MessageDescriptor,
+} from "@/lib/copy";
 import { formatSavings, formatSize, formatTimestamp, sanitizeFileName } from "@/lib/format";
 
-type QueueStatus = "pending" | "compressing" | "completed" | "error" | "cancelled";
-type QueueKind = "image" | "pdf";
-type ToastTone = "error" | "info" | "success";
-type DownloadType = "all" | "images" | "pdfs";
+type WorkspaceRecord<T> = Record<WorkspaceKind, T>;
 
-interface ToastState {
-  id: string;
-  message: string;
-  tone: ToastTone;
-}
-
-interface QueuedFile {
-  id: string;
-  name: string;
-  size: number;
-  label: string;
-  kind: QueueKind;
-  preview?: string;
-  status: QueueStatus;
-  compressedSize?: number;
-  originalFile: File;
-  resultBlob?: Blob;
-  downloadName?: string;
-  detail?: string;
-  error?: string;
-  pageCount?: number;
-  warning?: string;
+interface WorkspaceRuntimeState {
+  files: QueuedFile[];
+  isProcessing: boolean;
 }
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const LARGE_IMAGE_WARNING = 12 * 1024 * 1024;
 const LARGE_PDF_WARNING = 30 * 1024 * 1024;
-const ACCEPTED_TYPES = new Set([
+const IMAGE_ACCEPTED_TYPES = new Set([
   "image/jpeg",
   "image/png",
   "image/webp",
   "image/bmp",
   "image/x-ms-bmp",
   "image/tiff",
-  "application/pdf",
+  "image/svg+xml",
 ]);
+const PDF_ACCEPTED_TYPES = new Set(["application/pdf"]);
+const IMAGE_TARGETS: ImageOutputPreference[] = ["original", "JPG", "PNG", "WEBP"];
+const PRESETS: CompressionPreset[] = ["fast", "balanced", "smallest"];
+const PNG_MODES: PngCompressionMode[] = ["lossless", "lossy"];
+const PNG_COLOR_OPTIONS = [256, 128, 64, 32];
 
 function createId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function toMessageDescriptor(input: MessageDescriptor | string) {
+  return typeof input === "string" ? rawMessage(input) : input;
 }
 
 function getFileLabel(file: File) {
   if (file.type === "application/pdf") {
     return "PDF";
   }
-
+  if (file.type === "image/svg+xml") {
+    return "SVG";
+  }
   if (file.type.includes("jpeg")) {
     return "JPG";
   }
-
   if (file.type.includes("png")) {
     return "PNG";
   }
-
   if (file.type.includes("webp")) {
     return "WEBP";
   }
-
   if (file.type.includes("bmp")) {
     return "BMP";
   }
-
   if (file.type.includes("tiff")) {
     return "TIFF";
   }
@@ -99,52 +94,177 @@ function getFileLabel(file: File) {
   return "FILE";
 }
 
-function createQueuedFile(file: File): QueuedFile {
-  const isImage = file.type.startsWith("image/");
+function createQueuedFile(file: File, workspace: WorkspaceKind): QueuedFile {
+  const isPdf = workspace === "pdf";
+  const isSvg = file.type === "image/svg+xml";
 
   return {
     id: createId(),
+    workspace,
     name: file.name,
     size: file.size,
     label: getFileLabel(file),
-    kind: isImage ? "image" : "pdf",
-    preview: isImage ? URL.createObjectURL(file) : undefined,
+    kind: isPdf ? "pdf" : isSvg ? "svg" : "image",
+    preview: !isPdf ? URL.createObjectURL(file) : undefined,
     status: "pending",
     originalFile: file,
-    detail: isImage ? "Ready for browser-side image compression." : "Preparing PDF page estimate...",
+    detail: message(isPdf ? "preparingPdfEstimate" : "readyBrowserCompression"),
   };
 }
 
-function createPdfOptions(quality: number) {
+function createDefaultImageSettings(): ImageWorkspaceState {
   return {
-    dpi: quality >= 88 ? 156 : quality >= 72 ? 140 : quality >= 55 ? 126 : 110,
-    jpegQuality: Math.min(Math.max(quality / 100, 0.42), 0.86),
+    targetFormat: "original",
+    pngMode: "lossless",
+    maxDimension: 3200,
+    keepOriginalIfLarger: true,
+    webpQuality: 82,
+    jpeg: {
+      preset: "balanced",
+      quality: 78,
+      progressive: true,
+      chromaSubsampling: true,
+      trellisLoops: 2,
+    },
+    pngLossless: {
+      level: 3,
+      interlace: false,
+      optimiseAlpha: true,
+    },
+    pngLossy: {
+      colors: 256,
+      interlace: false,
+    },
+    svg: {
+      preset: "safe",
+      multipass: true,
+      removeDimensions: false,
+    },
   };
+}
+
+function createDefaultPdfSettings(): PdfCompressionInput {
+  return {
+    preset: "balanced",
+    dpi: 140,
+    jpegQuality: 0.72,
+    pngColorThreshold: 40,
+    pngLossless: {
+      level: 3,
+      interlace: false,
+      optimiseAlpha: true,
+    },
+  };
+}
+
+function presetLabel(locale: Locale, preset: CompressionPreset) {
+  if (locale === "zh") {
+    switch (preset) {
+      case "fast":
+        return "\u5feb\u901f";
+      case "balanced":
+        return "\u5747\u8861";
+      case "smallest":
+        return "\u6700\u5c0f";
+      case "custom":
+        return "\u81ea\u5b9a\u4e49";
+      default:
+        return preset;
+    }
+  }
+
+  return preset === "smallest" ? "Smallest" : preset[0].toUpperCase() + preset.slice(1);
+}
+
+function outputLabel(locale: Locale, target: ImageOutputPreference, keepSourceLabel: string) {
+  return target === "original" ? keepSourceLabel : target;
+}
+
+function pngModeLabel(mode: PngCompressionMode, copy: ReturnType<typeof getCopy>) {
+  return mode === "lossless" ? copy.settings.lossless : copy.settings.lossy;
+}
+
+function formatEncodingSuffix(locale: Locale, encoding?: string) {
+  if (!encoding) {
+    return "";
+  }
+
+  return formatTemplate(getCopy(locale).templates.pageEncodingSuffix, { encoding: encoding.toUpperCase() });
+}
+
+function optionClass(active: boolean) {
+  return `toggle-button ${active ? "toggle-button--active" : ""}`;
+}
+
+function languageButtonClass(active: boolean) {
+  return active
+    ? "rounded-xl bg-neutral-900 px-3 py-[0.3125rem] text-[11px] font-bold tracking-tight text-white transition-all"
+    : "rounded-xl px-3 py-[0.3125rem] text-[11px] font-bold tracking-tight text-neutral-500 transition-all hover:text-neutral-700";
+}
+
+function tabButtonClass(active: boolean) {
+  return active
+    ? "workspace-tab workspace-tab--active rounded-xl bg-neutral-900 px-3 py-[0.3125rem] text-[11px] font-bold tracking-tight text-white transition-all"
+    : "workspace-tab rounded-xl px-3 py-[0.3125rem] text-[11px] font-bold tracking-tight text-neutral-500 transition-all hover:text-neutral-700";
+}
+
+function getRangePercent(value: number, min: number, max: number) {
+  return `${((value - min) / (max - min)) * 100}%`;
+}
+
+async function loadImageCompressionModule() {
+  return import("@/lib/compression/image");
+}
+
+async function loadPdfCompressionModule() {
+  return import("@/lib/compression/pdf");
+}
+
+async function createZip() {
+  const { default: JSZipModule } = await import("jszip");
+  return new JSZipModule();
 }
 
 export default function App() {
-  const [files, setFiles] = useState<QueuedFile[]>([]);
-  const [outputFormat, setOutputFormat] = useState<ImageOutputFormat>("JPG");
-  const [quality, setQuality] = useState(85);
+  const [locale, setLocale] = useState<Locale>(getInitialLocale);
+  const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceKind>("image");
   const [toast, setToast] = useState<ToastState | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const filesRef = useRef<QueuedFile[]>([]);
-  const controllersRef = useRef<Record<string, AbortController>>({});
+  const [imageSettings, setImageSettings] = useState<ImageWorkspaceState>(createDefaultImageSettings);
+  const [pdfSettings, setPdfSettings] = useState<PdfCompressionInput>(createDefaultPdfSettings);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [runtime, setRuntime] = useState<WorkspaceRecord<WorkspaceRuntimeState>>({
+    image: { files: [], isProcessing: false },
+    pdf: { files: [], isProcessing: false },
+  });
+
+  const runtimeRef = useRef(runtime);
+  const configPanelRef = useRef<HTMLElement | null>(null);
+  const controllersRef = useRef<WorkspaceRecord<Record<string, AbortController>>>({
+    image: {},
+    pdf: {},
+  });
   const sessionStampRef = useRef(formatTimestamp());
+  const copy = useMemo(() => getCopy(locale), [locale]);
 
   useEffect(() => {
-    filesRef.current = files;
-  }, [files]);
+    runtimeRef.current = runtime;
+  }, [runtime]);
+
+  useEffect(() => {
+    document.body.dataset.language = locale;
+    document.documentElement.lang = locale === "zh" ? "zh-CN" : "en";
+    persistLocale(locale);
+  }, [locale]);
 
   useEffect(() => {
     return () => {
-      filesRef.current.forEach((file) => {
-        if (file.preview) {
-          URL.revokeObjectURL(file.preview);
-        }
-      });
+      for (const workspace of Object.keys(runtimeRef.current) as WorkspaceKind[]) {
+        runtimeRef.current[workspace].files.forEach((file) => {
+          if (file.preview) {
+            URL.revokeObjectURL(file.preview);
+          }
+        });
+      }
     };
   }, []);
 
@@ -157,260 +277,287 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
+  const activeFiles = runtime[activeWorkspace].files;
   const completedFiles = useMemo(
-    () => files.filter((file) => file.status === "completed" && file.resultBlob && file.downloadName),
-    [files],
+    () => activeFiles.filter((file) => file.status === "completed" && file.resultBlob && file.downloadName),
+    [activeFiles],
   );
-  const completedImages = completedFiles.filter((file) => file.kind === "image");
-  const completedPdfs = completedFiles.filter((file) => file.kind === "pdf");
+  const totalOriginal = useMemo(() => completedFiles.reduce((sum, file) => sum + file.size, 0), [completedFiles]);
+  const totalCompressed = useMemo(
+    () => completedFiles.reduce((sum, file) => sum + (file.compressedSize ?? file.size), 0),
+    [completedFiles],
+  );
+  const totalSavings = formatSavings(totalOriginal, totalCompressed);
 
-  function showToast(message: string, tone: ToastTone = "info") {
-    setToast({ id: createId(), message, tone });
+  function showToast(input: MessageDescriptor | string, tone: ToastState["tone"] = "info") {
+    setToast({ id: createId(), message: toMessageDescriptor(input), tone });
   }
 
-  function updateFile(id: string, patch: Partial<QueuedFile>) {
-    setFiles((current) => current.map((file) => (file.id === id ? { ...file, ...patch } : file)));
+  function setWorkspaceFiles(workspace: WorkspaceKind, updater: (files: QueuedFile[]) => QueuedFile[]) {
+    setRuntime((current) => ({
+      ...current,
+      [workspace]: {
+        ...current[workspace],
+        files: updater(current[workspace].files),
+      },
+    }));
   }
 
-  function removeFile(id: string) {
-    const activeController = controllersRef.current[id];
+  function setWorkspaceProcessing(workspace: WorkspaceKind, isProcessing: boolean) {
+    setRuntime((current) => ({
+      ...current,
+      [workspace]: {
+        ...current[workspace],
+        isProcessing,
+      },
+    }));
+  }
+
+  function revokePreview(file?: QueuedFile) {
+    if (file?.preview) {
+      URL.revokeObjectURL(file.preview);
+    }
+  }
+
+  function updateFile(workspace: WorkspaceKind, id: string, patch: Partial<QueuedFile>) {
+    setWorkspaceFiles(workspace, (current) => current.map((file) => (file.id === id ? { ...file, ...patch } : file)));
+  }
+
+  function removeFile(workspace: WorkspaceKind, file: QueuedFile) {
+    const activeController = controllersRef.current[workspace][file.id];
     if (activeController) {
       activeController.abort(new Error("Compression cancelled by user."));
-      delete controllersRef.current[id];
+      delete controllersRef.current[workspace][file.id];
     }
 
-    setFiles((current) => {
-      const target = current.find((file) => file.id === id);
-      if (target?.preview) {
-        URL.revokeObjectURL(target.preview);
-      }
-      return current.filter((file) => file.id !== id);
-    });
+    revokePreview(file);
+    setWorkspaceFiles(workspace, (current) => current.filter((entry) => entry.id !== file.id));
   }
 
-  function clearQueue() {
-    for (const controller of Object.values(controllersRef.current) as AbortController[]) {
-      controller.abort(new Error("Compression cancelled by reset."));
-    }
-    controllersRef.current = {};
-
-    filesRef.current.forEach((file) => {
-      if (file.preview) {
-        URL.revokeObjectURL(file.preview);
-      }
-    });
-
-    setFiles([]);
-    setIsProcessing(false);
-    showToast("Queue cleared. Any running jobs were cancelled.");
-  }
-
-  function cancelFile(id: string) {
-    const controller = controllersRef.current[id];
+  function cancelFile(workspace: WorkspaceKind, file: QueuedFile) {
+    const controller = controllersRef.current[workspace][file.id];
     if (!controller) {
       return;
     }
 
     controller.abort(new Error("Compression cancelled by user."));
-    delete controllersRef.current[id];
-    updateFile(id, {
+    delete controllersRef.current[workspace][file.id];
+    updateFile(workspace, file.id, {
       status: "cancelled",
-      detail: "Cancelled by user.",
+      detail: message("cancelledBeforeCompletion"),
       error: undefined,
+      progress: undefined,
     });
-    showToast("Cancelled one running job.");
+    showToast(message("cancelledOneRunningJob"));
+  }
+
+  function clearWorkspace(workspace: WorkspaceKind) {
+    for (const controller of Object.values(controllersRef.current[workspace]) as AbortController[]) {
+      controller.abort(new Error("Compression cancelled by reset."));
+    }
+    controllersRef.current[workspace] = {};
+
+    runtimeRef.current[workspace].files.forEach(revokePreview);
+    setRuntime((current) => ({
+      ...current,
+      [workspace]: {
+        files: [],
+        isProcessing: false,
+      },
+    }));
+    showToast(clearedWorkspaceLabel(locale, workspace), "info");
   }
 
   async function enrichPdfMeta(queuedFile: QueuedFile) {
     try {
+      const { estimatePdfPages } = await loadPdfCompressionModule();
       const pageCount = await estimatePdfPages(queuedFile.originalFile);
-      updateFile(queuedFile.id, {
+      updateFile("pdf", queuedFile.id, {
         pageCount,
-        detail: `${pageCount} page${pageCount === 1 ? "" : "s"} ready for scanned-PDF compression.`,
+        detail: pageReadyLabel(locale, pageCount),
       });
 
       if (pageCount > 40) {
-        updateFile(queuedFile.id, {
-          warning: "Long PDF detected. Expect slower processing and higher browser memory usage.",
+        updateFile("pdf", queuedFile.id, {
+          warning: message("longPdfDetected"),
         });
-        showToast("Long PDF detected. Expect slower local processing.");
+        showToast(message("longPdfToast"));
       }
     } catch {
-      updateFile(queuedFile.id, {
-        detail: "PDF uploaded. Page estimate unavailable in this browser.",
+      updateFile("pdf", queuedFile.id, {
+        detail: message("pdfUploadedEstimateUnavailable"),
       });
     }
   }
 
-  function handleFileUpload(
-    event: React.ChangeEvent<HTMLInputElement> | React.DragEvent<HTMLElement>,
-  ) {
-    let uploadedFiles: FileList | null = null;
-
-    if ("files" in event.target && event.target.files) {
-      uploadedFiles = event.target.files;
-    } else if ("dataTransfer" in event && event.dataTransfer.files) {
-      uploadedFiles = event.dataTransfer.files;
-    }
-
-    if (!uploadedFiles?.length) {
-      return;
-    }
-
+  function handleFiles(workspace: WorkspaceKind, uploadedFiles: FileList) {
     const queue: QueuedFile[] = [];
 
     Array.from(uploadedFiles).forEach((file) => {
-      if (!ACCEPTED_TYPES.has(file.type)) {
-        showToast(`Unsupported file type: ${file.name}`, "error");
+      const acceptedTypes = workspace === "image" ? IMAGE_ACCEPTED_TYPES : PDF_ACCEPTED_TYPES;
+
+      if (!acceptedTypes.has(file.type)) {
+        showToast(message("unsupportedFileType", { name: file.name }), "error");
         return;
       }
 
       if (file.size > MAX_FILE_SIZE) {
-        showToast(`File too large (max 50MB): ${file.name}`, "error");
+        showToast(message("fileTooLarge", { name: file.name, maxMb: 50 }), "error");
         return;
       }
 
-      if (file.type.startsWith("image/") && file.size >= LARGE_IMAGE_WARNING) {
-        showToast(`${file.name} is large. Compression may take longer on this device.`);
+      if (workspace === "image" && file.size >= LARGE_IMAGE_WARNING) {
+        showToast(message("largeImageWarning", { name: file.name }));
       }
 
-      if (file.type === "application/pdf" && file.size >= LARGE_PDF_WARNING) {
-        showToast(`${file.name} is a large PDF. Expect higher browser memory usage.`);
+      if (workspace === "pdf" && file.size >= LARGE_PDF_WARNING) {
+        showToast(message("largePdfWarning", { name: file.name }));
       }
 
-      queue.push(createQueuedFile(file));
+      queue.push(createQueuedFile(file, workspace));
     });
 
     if (!queue.length) {
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
       return;
     }
 
-    setFiles((current) => [...current, ...queue]);
+    setWorkspaceFiles(workspace, (current) => [...current, ...queue]);
 
-    queue.forEach((queuedFile) => {
-      if (queuedFile.kind === "pdf") {
+    if (workspace === "pdf") {
+      queue.forEach((queuedFile) => {
         void enrichPdfMeta(queuedFile);
-      }
-    });
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
+      });
     }
   }
 
-  async function compressQueue() {
-    const pendingFiles = filesRef.current.filter((file) =>
+  async function compressQueue(workspace: WorkspaceKind) {
+    const pendingFiles = runtimeRef.current[workspace].files.filter((file) =>
       ["pending", "error", "cancelled"].includes(file.status),
     );
 
     if (!pendingFiles.length) {
-      showToast("No pending files to compress.", "error");
+      showToast(noPendingLabel(locale, workspace), "error");
       return;
     }
 
-    setIsProcessing(true);
+    setWorkspaceProcessing(workspace, true);
 
     try {
       for (const queuedFile of pendingFiles) {
-        if (!filesRef.current.some((file) => file.id === queuedFile.id)) {
+        if (!runtimeRef.current[workspace].files.some((file) => file.id === queuedFile.id)) {
           continue;
         }
 
         const controller = new AbortController();
-        controllersRef.current[queuedFile.id] = controller;
+        controllersRef.current[workspace][queuedFile.id] = controller;
 
-        updateFile(queuedFile.id, {
+        updateFile(workspace, queuedFile.id, {
           status: "compressing",
+          progress: 0,
           error: undefined,
           detail:
-            queuedFile.kind === "image"
-              ? "Compressing image locally in your browser..."
-              : `Rasterizing ${queuedFile.pageCount ?? "PDF"} pages locally...`,
+            workspace === "image"
+              ? message("preparingImagePipeline")
+              : message("rasterizingPdfPages", {
+                  count: queuedFile.pageCount ?? copy.tabs.pdf,
+                  pageLabel: locale === "zh" ? "\u9875" : "pages",
+                }),
         });
 
         try {
-          if (queuedFile.kind === "image") {
-            const result = await compressImageFile(
-              queuedFile.originalFile,
-              { outputFormat, quality },
-              controller.signal,
-              (progress) => {
-                updateFile(queuedFile.id, {
-                  detail: `Compressing image locally... ${Math.round(progress)}%`,
-                });
-              },
-            );
+          if (workspace === "image") {
+            const { compressImageFile } = await loadImageCompressionModule();
+            const result = await compressImageFile(queuedFile.originalFile, imageSettings, controller.signal, (progress) => {
+              updateFile(workspace, queuedFile.id, {
+                progress,
+                detail: message("compressingImage", { progress: Math.round(progress) }),
+              });
+            });
 
-            updateFile(queuedFile.id, {
+            updateFile(workspace, queuedFile.id, {
               status: "completed",
+              progress: 100,
               compressedSize: result.file.size,
               resultBlob: result.file,
               downloadName: result.file.name,
-              detail: "Image compressed and ready to download.",
-              warning: result.warning ?? queuedFile.warning,
+              detail: message(result.retainedOriginal ? "keptOriginal" : "imageCompressedReady"),
+              warning: result.warning ? rawMessage(result.warning) : undefined,
+              engine: result.engine,
+              fallbackReason: result.fallbackReason ? rawMessage(result.fallbackReason) : undefined,
+              retainedOriginal: result.retainedOriginal,
+              metrics: result.metrics,
             });
 
             if (result.warning) {
-              showToast(result.warning);
+              showToast(rawMessage(result.warning));
             }
           } else {
-            const pdfOptions = createPdfOptions(quality);
-            const compressedPdf = await compressPdfFile(
-              queuedFile.originalFile,
-              pdfOptions,
-              controller.signal,
-              (currentPage, totalPages) => {
-                updateFile(queuedFile.id, {
-                  detail: `Compressing scanned PDF page ${currentPage}/${totalPages}...`,
-                });
-              },
-            );
-
-            updateFile(queuedFile.id, {
-              status: "completed",
-              compressedSize: compressedPdf.size,
-              resultBlob: compressedPdf,
-              downloadName: compressedPdf.name,
-              detail: "PDF compressed and ready to download.",
+            const { compressPdfFile } = await loadPdfCompressionModule();
+            const result = await compressPdfFile(queuedFile.originalFile, pdfSettings, controller.signal, (currentPage, totalPages, encoding) => {
+              updateFile(workspace, queuedFile.id, {
+                progress: Math.round((currentPage / totalPages) * 100),
+                detail: message("compressingPdfPage", {
+                  currentPage,
+                  totalPages,
+                  encoding: formatEncodingSuffix(locale, encoding),
+                }),
+              });
             });
+
+            updateFile(workspace, queuedFile.id, {
+              status: "completed",
+              progress: 100,
+              compressedSize: result.file.size,
+              resultBlob: result.file,
+              downloadName: result.file.name,
+              detail: message("pdfCompressedReady", {
+                jpeg: result.pageEncodings.jpeg,
+                png: result.pageEncodings.png,
+              }),
+              warning: result.warning ? rawMessage(result.warning) : undefined,
+              engine: result.engine,
+              fallbackReason: result.fallbackReason ? rawMessage(result.fallbackReason) : undefined,
+              metrics: result.metrics,
+            });
+
+            if (result.warning) {
+              showToast(rawMessage(result.warning));
+            }
           }
         } catch (error) {
           if (controller.signal.aborted) {
-            updateFile(queuedFile.id, {
+            updateFile(workspace, queuedFile.id, {
               status: "cancelled",
-              detail: "Cancelled before completion.",
+              detail: message("cancelledBeforeCompletion"),
               error: undefined,
+              progress: undefined,
             });
           } else {
-            const message =
-              error instanceof Error ? error.message : "Compression failed in this browser.";
-
-            updateFile(queuedFile.id, {
+            const runtimeMessage = error instanceof Error ? rawMessage(error.message) : message("compressionFailedBrowser");
+            updateFile(workspace, queuedFile.id, {
               status: "error",
-              detail: "Compression failed.",
-              error: message,
+              detail: message("compressionFailed"),
+              error: runtimeMessage,
+              progress: undefined,
             });
-            showToast(message, "error");
+            showToast(runtimeMessage, "error");
           }
         } finally {
-          delete controllersRef.current[queuedFile.id];
+          delete controllersRef.current[workspace][queuedFile.id];
         }
       }
 
-      if (filesRef.current.some((file) => file.status === "completed")) {
-        showToast("Compression finished. Results are ready to download.", "success");
+      if (runtimeRef.current[workspace].files.some((file) => file.status === "completed")) {
+        showToast(compressionFinishedLabel(locale, workspace), "success");
       }
     } finally {
-      setIsProcessing(false);
+      setWorkspaceProcessing(workspace, false);
     }
   }
 
   function downloadSingle(file: QueuedFile) {
     if (!file.resultBlob || !file.downloadName) {
-      showToast("This file is not ready to download yet.", "error");
+      showToast(message("fileNotReadyDownload"), "error");
       return;
     }
 
@@ -422,24 +569,16 @@ export default function App() {
     anchor.click();
     document.body.removeChild(anchor);
     URL.revokeObjectURL(url);
-    showToast(`Downloaded ${file.downloadName}.`, "success");
+    showToast(message("downloadedFile", { name: file.downloadName }), "success");
   }
 
-  async function downloadZip(type: DownloadType) {
-    const selectedFiles = completedFiles.filter((file) => {
-      if (type === "all") {
-        return true;
-      }
-
-      if (type === "images") {
-        return file.kind === "image";
-      }
-
-      return file.kind === "pdf";
-    });
+  async function downloadZip(workspace: WorkspaceKind) {
+    const selectedFiles = runtime[workspace].files.filter(
+      (file) => file.status === "completed" && file.resultBlob && file.downloadName,
+    );
 
     if (!selectedFiles.length) {
-      showToast(`No ${type === "all" ? "completed files" : type} to download.`, "error");
+      showToast(noCompletedToDownloadLabel(locale, workspace), "error");
       return;
     }
 
@@ -448,382 +587,613 @@ export default function App() {
       return;
     }
 
-    const zip = new JSZip();
-    const prefix =
-      type === "all" ? "pixelsmall-bundle" : type === "images" ? "pixelsmall-images" : "pixelsmall-pdfs";
-
+    const zip = await createZip();
     selectedFiles.forEach((file) => {
-      const safeName = sanitizeFileName(file.downloadName ?? file.name);
-
-      if (type === "all") {
-        const folder = file.kind === "image" ? "images" : "pdfs";
-        zip.folder(folder)?.file(safeName, file.resultBlob!);
-        return;
-      }
-
-      zip.file(safeName, file.resultBlob!);
+      zip.file(sanitizeFileName(file.downloadName ?? file.name), file.resultBlob!);
     });
 
     const content = await zip.generateAsync({ type: "blob" });
     const url = URL.createObjectURL(content);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${prefix}-${sessionStampRef.current}.zip`;
+    anchor.download = `pixelsmall-${workspace}-${sessionStampRef.current}.zip`;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
     URL.revokeObjectURL(url);
-    showToast(`Prepared ${selectedFiles.length} files in ${anchor.download}.`, "success");
+    showToast(message("preparedZip", { count: selectedFiles.length, name: anchor.download }), "success");
+  }
+
+  const queueEmptyLabel = activeWorkspace === "image" ? copy.empty.imageQueue : copy.empty.pdfQueue;
+  const settingsLabel = activeWorkspace === "image" ? copy.imageSettingsLabel : copy.pdfSettingsLabel;
+  const showJpegControls = activeWorkspace === "image" && imageSettings.targetFormat === "JPG";
+  const showPngControls = activeWorkspace === "image" && imageSettings.targetFormat === "PNG";
+  const showWebpControls = activeWorkspace === "image" && imageSettings.targetFormat === "WEBP";
+  const showSvgControls = activeWorkspace === "image" && imageSettings.targetFormat === "original";
+  const snapshotMiddleLabel =
+    activeWorkspace === "image"
+      ? formatTemplate(copy.templates.imageSummary, {
+          pngMode: pngModeLabel(imageSettings.pngMode, copy),
+          preset: presetLabel(locale, imageSettings.jpeg.preset),
+        })
+      : formatTemplate(copy.templates.pdfSummary, {
+          dpi: pdfSettings.dpi,
+          quality: Math.round(pdfSettings.jpegQuality * 100),
+        });
+  const snapshotBottomLabel = completedFiles.length
+    ? formatTemplate(copy.templates.completedOutputSummary, {
+        compressed: formatSize(totalCompressed),
+        original: formatSize(totalOriginal),
+      })
+    : copy.empty.noCompleted;
+  const activeWorkspaceLabel = activeWorkspace === "image" ? copy.tabs.image : copy.tabs.pdf;
+  const primaryActionLabel = runtime[activeWorkspace].isProcessing
+    ? copy.actions.processing
+    : activeWorkspace === "image"
+      ? copy.actions.compressImage
+      : copy.actions.compressPdf;
+
+  function scrollToSettings() {
+    configPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#fcfcfc] font-sans selection:bg-zinc-900 selection:text-white">
-      <AnimatePresence>
-        {toast && (
-          <motion.div
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 20 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="fixed top-0 left-1/2 -translate-x-1/2 z-50 w-full max-w-md px-4"
-          >
-            <div
-              className={`bg-white shadow-xl rounded-2xl p-4 flex items-center gap-3 border ${
-                toast.tone === "error"
-                  ? "border-red-100"
-                  : toast.tone === "success"
-                    ? "border-emerald-100"
-                    : "border-zinc-100"
-              }`}
-            >
-              <div
-                className={`p-2 rounded-xl ${
-                  toast.tone === "error"
-                    ? "bg-red-50"
-                    : toast.tone === "success"
-                      ? "bg-emerald-50"
-                      : "bg-zinc-50"
-                }`}
-              >
-                {toast.tone === "error" ? (
-                  <AlertCircle className="w-5 h-5 text-red-500" />
-                ) : toast.tone === "success" ? (
-                  <CheckCircle2 className="w-5 h-5 text-emerald-500" />
-                ) : (
-                  <Settings className="w-5 h-5 text-zinc-500" />
-                )}
+    <div className="app-frame min-h-screen bg-[#FDFDFD] p-8 font-sans text-[#1D1D1F] selection:bg-neutral-200 md:p-16">
+      <ToastRegion locale={locale} closeLabel={copy.closeToastLabel} toast={toast} onClose={() => setToast(null)} />
+
+      <div className="page-shell mx-auto grid w-full min-w-0 max-w-6xl grid-cols-1 items-start gap-10 lg:grid-cols-12">
+        <main className="workspace-grid">
+          <section className="workspace-main">
+            <header className="page-header">
+              <div className="page-header__brand">
+                <h1 className="page-header__title display-face">PixelSmall</h1>
               </div>
-              <p className="text-sm font-bold text-zinc-900 flex-grow">{toast.message}</p>
-              <button onClick={() => setToast(null)} className="text-zinc-300 hover:text-zinc-500">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
-      <header className="w-full max-w-6xl mx-auto px-8 py-12 flex justify-between items-center">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-zinc-900 rounded-xl flex items-center justify-center shadow-lg shadow-zinc-200">
-            <Zap className="w-5 h-5 text-white fill-white" />
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-zinc-900">PixelSmall</h1>
-        </div>
-        <div className="flex items-center gap-2 text-zinc-400 font-bold text-[10px] tracking-[0.2em] uppercase">
-          <Settings className="w-4 h-4" />
-          Configuration
-        </div>
-      </header>
-
-      <main className="flex-grow w-full max-w-6xl mx-auto px-8 pb-20 grid grid-cols-1 lg:grid-cols-3 gap-10">
-        <div className="lg:col-span-2 space-y-10">
-          <section
-            onClick={() => fileInputRef.current?.click()}
-            onDragEnter={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              setIsDragging(true);
-            }}
-            onDragOver={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              setIsDragging(true);
-            }}
-            onDragLeave={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                return;
-              }
-              setIsDragging(false);
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              setIsDragging(false);
-              handleFileUpload(event);
-            }}
-            className={`bg-white rounded-2xl border shadow-[0_8px_30px_rgb(0,0,0,0.02)] transition-all cursor-pointer group relative overflow-hidden ${
-              isDragging
-                ? "border-zinc-900 shadow-[0_12px_40px_rgb(0,0,0,0.06)]"
-                : "border-zinc-100 hover:shadow-[0_8px_30px_rgb(0,0,0,0.04)]"
-            }`}
-          >
-            <input
-              type="file"
-              ref={fileInputRef}
-              className="hidden"
-              multiple
-              accept="image/*,application/pdf"
-              onChange={handleFileUpload}
-            />
-            <div className="flex flex-col items-center justify-center py-24 px-8 relative z-10">
-              <div className="bg-zinc-50 p-5 rounded-2xl mb-6 group-hover:scale-110 transition-transform">
-                <Plus className="w-6 h-6 text-zinc-300" />
-              </div>
-              <p className="text-zinc-400 font-bold text-sm">
-                {isDragging ? "Drop files to queue them locally" : "Drag & Drop or Click to Upload"}
-              </p>
-              <p className="text-[10px] text-zinc-300 font-bold uppercase tracking-widest mt-2">
-                Images & PDF · Max 50MB
-              </p>
-            </div>
-            <div className="absolute inset-0 bg-zinc-50/0 group-hover:bg-zinc-50/20 transition-colors" />
-          </section>
-
-          <section className="bg-white rounded-2xl border border-zinc-100 shadow-[0_8px_30px_rgb(0,0,0,0.02)] overflow-hidden">
-            <div className="flex items-center justify-between px-8 py-6 border-b border-zinc-50">
-              <div className="flex items-center gap-3">
-                <Layers className="w-4 h-4 text-zinc-900" />
-                <h2 className="font-bold text-sm text-zinc-900">Queue List</h2>
-              </div>
-              <div className="flex items-center gap-4">
-                <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-[0.2em]">
-                  {files.length} ITEMS
-                </span>
-              </div>
-            </div>
-
-            <div className="p-8">
-              {files.length > 0 ? (
-                <Reorder.Group axis="y" values={files} onReorder={setFiles} className="space-y-4">
-                  {files.map((file) => {
-                    const savings = formatSavings(file.size, file.compressedSize);
-
-                    return (
-                      <Reorder.Item
-                        key={file.id}
-                        value={file}
-                        initial={{ opacity: 0, y: 10 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95 }}
-                        className="flex items-center justify-between p-5 bg-zinc-50/50 rounded-xl group cursor-grab active:cursor-grabbing border border-transparent hover:border-zinc-100 transition-all"
-                      >
-                        <div className="flex items-center gap-5 min-w-0">
-                          <GripVertical className="w-4 h-4 text-zinc-200 group-hover:text-zinc-300 transition-colors shrink-0" />
-                          <div className="w-14 h-14 bg-white rounded-xl flex items-center justify-center shadow-sm overflow-hidden border border-zinc-50 shrink-0">
-                            {file.preview ? (
-                              <img src={file.preview} alt={file.name} className="w-full h-full object-cover" />
-                            ) : (
-                              <FileText className="w-6 h-6 text-zinc-400" />
-                            )}
-                          </div>
-                          <div className="min-w-0">
-                            <p className="font-bold text-sm text-zinc-900 truncate max-w-[240px]">{file.name}</p>
-                            <div className="flex items-center gap-2 mt-1 flex-wrap">
-                              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
-                                {formatSize(file.size)}
-                              </span>
-                              <span className="text-[10px] font-bold text-zinc-300 uppercase tracking-widest">
-                                {file.label}
-                              </span>
-                              {typeof file.pageCount === "number" && (
-                                <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">
-                                  {file.pageCount} Pages
-                                </span>
-                              )}
-                              {file.compressedSize ? (
-                                <>
-                                  <span className="text-zinc-300 text-[10px]">→</span>
-                                  <span className="text-[10px] font-bold text-green-500 uppercase tracking-widest">
-                                    {formatSize(file.compressedSize)}
-                                  </span>
-                                  {savings ? (
-                                    <span className="text-[10px] font-bold text-green-500/70 uppercase tracking-widest bg-green-50 px-1.5 py-0.5 rounded">
-                                      -{savings}%
-                                    </span>
-                                  ) : null}
-                                </>
-                              ) : null}
-                            </div>
-                            {file.detail ? (
-                              <p className="mt-2 text-[11px] font-medium text-zinc-400 truncate max-w-[340px]">
-                                {file.detail}
-                              </p>
-                            ) : null}
-                            {file.warning ? (
-                              <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-amber-500">
-                                {file.warning}
-                              </p>
-                            ) : null}
-                            {file.error ? (
-                              <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-red-500">
-                                {file.error}
-                              </p>
-                            ) : null}
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-3 shrink-0">
-                          {file.status === "compressing" ? (
-                            <Loader2 className="w-4 h-4 text-zinc-400 animate-spin" />
-                          ) : file.status === "completed" ? (
-                            <CheckCircle2 className="w-4 h-4 text-green-500" />
-                          ) : file.status === "error" ? (
-                            <AlertCircle className="w-4 h-4 text-red-500" />
-                          ) : file.status === "cancelled" ? (
-                            <AlertCircle className="w-4 h-4 text-amber-500" />
-                          ) : null}
-
-                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            {file.status === "completed" ? (
-                              <button
-                                onClick={() => downloadSingle(file)}
-                                className="p-2 hover:bg-white rounded-lg transition-colors text-zinc-400 hover:text-zinc-900 shadow-sm border border-transparent hover:border-zinc-100"
-                              >
-                                <Download className="w-4 h-4" />
-                              </button>
-                            ) : null}
-                            <button
-                              onClick={() => (file.status === "compressing" ? cancelFile(file.id) : removeFile(file.id))}
-                              className="p-2 hover:bg-white rounded-lg transition-colors text-zinc-300 hover:text-red-500 shadow-sm border border-transparent hover:border-zinc-100"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </div>
-                      </Reorder.Item>
-                    );
-                  })}
-                </Reorder.Group>
-              ) : (
-                <div className="py-24 flex flex-col items-center justify-center text-center">
-                  <div className="bg-zinc-50 p-5 rounded-2xl mb-5">
-                    <ImageIcon className="w-8 h-8 text-zinc-100" />
-                  </div>
-                  <p className="text-zinc-300 text-sm font-bold">No files in queue</p>
+              <div className="page-header__controls">
+                <div className="page-header__tabs">
+                  <WorkspaceTabs
+                    activeWorkspace={activeWorkspace}
+                    imageLabel={copy.tabs.image}
+                    pdfLabel={copy.tabs.pdf}
+                    getButtonClassName={tabButtonClass}
+                    onChange={setActiveWorkspace}
+                  />
                 </div>
-              )}
-            </div>
-          </section>
-        </div>
 
-        <aside className="space-y-8">
-          <div className="bg-white rounded-2xl border border-zinc-100 shadow-[0_8px_30px_rgb(0,0,0,0.02)] p-10 space-y-12">
-            <div className="space-y-5">
-              <label className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-300">
-                Output Format
-              </label>
-              <div className="bg-zinc-50 p-1.5 rounded-2xl grid grid-cols-3 gap-1.5">
-                {(["JPG", "PNG", "WEBP", "BMP", "TIFF"] as const).map((format) => (
-                  <button
-                    key={format}
-                    onClick={() => setOutputFormat(format)}
-                    className={`py-3 text-[10px] font-bold rounded-xl transition-all ${
-                      outputFormat === format
-                        ? "bg-white text-zinc-900 shadow-sm"
-                        : "text-zinc-400 hover:bg-white/50"
-                    }`}
-                  >
-                    {format}
+                <div className="page-header__locale">
+                  <button type="button" className={languageButtonClass(locale === "en")} onClick={() => setLocale("en")}>
+                    {copy.languageOptionEnglish}
                   </button>
+                  <button type="button" className={languageButtonClass(locale === "zh")} onClick={() => setLocale("zh")}>
+                    {copy.languageOptionChinese}
+                  </button>
+                </div>
+              </div>
+            </header>
+
+            {activeWorkspace === "image" ? (
+              <FileDropzone
+                title={copy.dropzone.imageTitle}
+                subtitle=""
+                accept="image/jpeg,image/png,image/webp,image/bmp,image/x-ms-bmp,image/tiff,image/svg+xml"
+                hint={copy.dropzone.imageHint}
+                compact={activeFiles.length > 0}
+                onFiles={(files) => handleFiles("image", files)}
+              />
+            ) : (
+              <FileDropzone
+                title={copy.dropzone.pdfTitle}
+                subtitle=""
+                accept="application/pdf"
+                hint={copy.dropzone.pdfHint}
+                compact={activeFiles.length > 0}
+                onFiles={(files) => handleFiles("pdf", files)}
+              />
+            )}
+
+            <section className="upload-guide">
+              <div className="upload-guide__grid upload-guide__grid--four">
+                <article className="upload-guide__item upload-guide__item--compact-mobile">
+                  <p className="section-kicker">{settingsLabel}</p>
+                  <p className="upload-guide__body upload-guide__body--tag">{snapshotMiddleLabel}</p>
+                  <p className="upload-guide__meta-note">{activeWorkspaceLabel}</p>
+                </article>
+                <article className="upload-guide__item upload-guide__item--compact-mobile">
+                  <p className="section-kicker">{copy.savingsLabel}</p>
+                  <p className="upload-guide__body upload-guide__body--tag">{snapshotBottomLabel}</p>
+                  <p className="upload-guide__meta-note">
+                    {totalSavings ? formatTemplate(copy.templates.savingsSoFar, { savings: totalSavings }) : copy.empty.noDownloads}
+                  </p>
+                </article>
+              </div>
+            </section>
+
+            <QueueList
+              locale={locale}
+              workspace={activeWorkspace}
+              title={copy.queueTitle}
+              files={activeFiles}
+              isProcessing={runtime[activeWorkspace].isProcessing}
+              emptyLabel={queueEmptyLabel}
+              downloadLabel={copy.actions.download}
+              removeLabel={copy.actions.remove}
+              cancelLabel={copy.actions.cancel}
+              clearLabel={copy.clearWorkspaceLabel}
+              onDownload={downloadSingle}
+              onRemove={(file) => removeFile(activeWorkspace, file)}
+              onCancel={(file) => cancelFile(activeWorkspace, file)}
+              onClearAll={() => clearWorkspace(activeWorkspace)}
+            />
+          </section>
+
+          <aside className="workspace-aside" ref={configPanelRef}>
+            <header className="config-header">
+              <h2 className="config-header__title">
+                <Settings2 className="config-header__icon h-3.5 w-3.5" />
+                CONFIGURATION
+              </h2>
+            </header>
+
+            <section className="surface-card config-panel">
+              <div className="config-stack">
+                {activeWorkspace === "image" ? (
+                  <>
+                    <div className="control-block control-block--tight">
+                      <label className="output-format-label">{copy.preferredOutputLabel}</label>
+                      <div className="output-format-grid">
+                        {IMAGE_TARGETS.map((target) => (
+                          <button
+                            key={target}
+                            type="button"
+                            onClick={() => setImageSettings((current) => ({ ...current, targetFormat: target }))}
+                            className={imageSettings.targetFormat === target ? "output-format-button output-format-button--active" : "output-format-button"}
+                          >
+                            {outputLabel(locale, target, copy.settings.keepSource)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {showJpegControls ? (
+                      <div className="control-section">
+                        <div className="control-group-head control-group-head--native">
+                          <p className="output-format-label">{copy.jpegPresetLabel}</p>
+                        </div>
+                        <div className="toggle-surface grid grid-cols-2 gap-1">
+                          {PRESETS.map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              onClick={() =>
+                                setImageSettings((current) => ({
+                                  ...current,
+                                  jpeg: { ...current.jpeg, preset },
+                                }))
+                              }
+                              className={optionClass(imageSettings.jpeg.preset === preset)}
+                            >
+                              {presetLabel(locale, preset)}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="control-subsection">
+                          <div className="quality-heading">
+                            <label className="output-format-label">{copy.jpegQualityLabel}</label>
+                            <span className="quality-value">{imageSettings.jpeg.quality}%</span>
+                          </div>
+                          <div className="quality-range-shell">
+                            <div className="quality-range-track" />
+                            <div
+                              className="quality-range-fill"
+                              style={{ width: getRangePercent(imageSettings.jpeg.quality, 40, 92) }}
+                            />
+                            <input
+                              type="range"
+                              min="40"
+                              max="92"
+                              value={imageSettings.jpeg.quality}
+                              onChange={(event) =>
+                                setImageSettings((current) => ({
+                                  ...current,
+                                  jpeg: { ...current.jpeg, quality: parseInt(event.target.value, 10) },
+                                }))
+                              }
+                              className="range-input"
+                            />
+                            <div
+                              className="quality-range-thumb"
+                              style={{ left: `calc(${getRangePercent(imageSettings.jpeg.quality, 40, 92)} - 0.5rem)` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {showPngControls ? (
+                      <div className="control-section">
+                        <div className="control-group-head control-group-head--native">
+                          <p className="output-format-label">{copy.pngModeLabel}</p>
+                        </div>
+                        <div className="toggle-surface grid grid-cols-2 gap-1">
+                          {PNG_MODES.map((mode) => (
+                            <button
+                              key={mode}
+                              type="button"
+                              onClick={() => setImageSettings((current) => ({ ...current, pngMode: mode }))}
+                              className={optionClass(imageSettings.pngMode === mode)}
+                            >
+                              {pngModeLabel(mode, copy)}
+                            </button>
+                          ))}
+                        </div>
+
+                        {imageSettings.pngMode === "lossless" ? (
+                          <div className="control-subsection">
+                            <div className="quality-heading">
+                              <label className="output-format-label">{copy.oxipngLevelLabel}</label>
+                              <span className="quality-value">{imageSettings.pngLossless.level}</span>
+                            </div>
+                            <div className="quality-range-shell">
+                              <div className="quality-range-track" />
+                              <div
+                                className="quality-range-fill"
+                                style={{ width: getRangePercent(imageSettings.pngLossless.level, 1, 6) }}
+                              />
+                              <input
+                                type="range"
+                                min="1"
+                                max="6"
+                                value={imageSettings.pngLossless.level}
+                                onChange={(event) =>
+                                  setImageSettings((current) => ({
+                                    ...current,
+                                    pngLossless: { ...current.pngLossless, level: parseInt(event.target.value, 10) },
+                                  }))
+                                }
+                                className="range-input"
+                              />
+                              <div
+                                className="quality-range-thumb"
+                                style={{ left: `calc(${getRangePercent(imageSettings.pngLossless.level, 1, 6)} - 0.5rem)` }}
+                              />
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="control-subsection">
+                            <label className="control-label">{copy.pngPaletteLabel}</label>
+                            <div className="toggle-surface grid grid-cols-4 gap-1">
+                              {PNG_COLOR_OPTIONS.map((colors) => (
+                                <button
+                                  key={colors}
+                                  type="button"
+                                  onClick={() =>
+                                    setImageSettings((current) => ({
+                                      ...current,
+                                      pngLossy: { ...current.pngLossy, colors },
+                                    }))
+                                  }
+                                  className={optionClass(imageSettings.pngLossy.colors === colors)}
+                                >
+                                  {colors}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+
+                    {showWebpControls ? (
+                      <div className="control-section">
+                        <div className="control-group-head control-group-head--native">
+                          <p className="output-format-label">{copy.webpQualityLabel}</p>
+                        </div>
+                        <div className="control-subsection control-subsection--first">
+                          <div className="quality-heading">
+                            <label className="output-format-label">{copy.webpQualityLabel}</label>
+                            <span className="quality-value">{imageSettings.webpQuality}%</span>
+                          </div>
+                          <div className="quality-range-shell">
+                            <div className="quality-range-track" />
+                            <div
+                              className="quality-range-fill"
+                              style={{ width: getRangePercent(imageSettings.webpQuality, 40, 95) }}
+                            />
+                            <input
+                              type="range"
+                              min="40"
+                              max="95"
+                              value={imageSettings.webpQuality}
+                              onChange={(event) =>
+                                setImageSettings((current) => ({ ...current, webpQuality: parseInt(event.target.value, 10) }))
+                              }
+                              className="range-input"
+                            />
+                            <div
+                              className="quality-range-thumb"
+                              style={{ left: `calc(${getRangePercent(imageSettings.webpQuality, 40, 95)} - 0.5rem)` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="control-section">
+                      <button
+                        type="button"
+                        className="advanced-toggle"
+                        onClick={() => setAdvancedOpen((current) => !current)}
+                        aria-expanded={advancedOpen}
+                      >
+                        <span className="control-group-head control-group-head--native">
+                          <span className="advanced-toggle__title-row">
+                            <span className="output-format-label">{copy.advancedLabel}</span>
+                            <span className="advanced-toggle__badge">{copy.advancedHintLabel}</span>
+                          </span>
+                        </span>
+                        <ChevronDown className={advancedOpen ? "advanced-toggle__icon advanced-toggle__icon--open" : "advanced-toggle__icon"} />
+                      </button>
+
+                      {advancedOpen ? (
+                        <>
+                          <div className="control-subsection">
+                            <div className="quality-heading">
+                              <label className="output-format-label">{copy.maxDimensionLabel}</label>
+                              <span className="quality-value">{imageSettings.maxDimension}px</span>
+                            </div>
+                            <div className="quality-range-shell">
+                              <div className="quality-range-track" />
+                              <div
+                                className="quality-range-fill"
+                                style={{ width: getRangePercent(imageSettings.maxDimension, 1600, 4000) }}
+                              />
+                              <input
+                                type="range"
+                                min="1600"
+                                max="4000"
+                                step="200"
+                                value={imageSettings.maxDimension}
+                                onChange={(event) =>
+                                  setImageSettings((current) => ({ ...current, maxDimension: parseInt(event.target.value, 10) }))
+                                }
+                                className="range-input"
+                              />
+                              <div
+                                className="quality-range-thumb"
+                                style={{ left: `calc(${getRangePercent(imageSettings.maxDimension, 1600, 4000)} - 0.5rem)` }}
+                              />
+                            </div>
+                          </div>
+
+                          <div className="control-subsection">
+                            <label className="control-label">{copy.keepResultLabel}</label>
+                            <div className="toggle-surface grid grid-cols-2 gap-1">
+                              <button
+                                type="button"
+                                onClick={() => setImageSettings((current) => ({ ...current, keepOriginalIfLarger: true }))}
+                                className={optionClass(imageSettings.keepOriginalIfLarger)}
+                              >
+                                {copy.settings.keepSmallerResult}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setImageSettings((current) => ({ ...current, keepOriginalIfLarger: false }))}
+                                className={optionClass(!imageSettings.keepOriginalIfLarger)}
+                              >
+                                {copy.settings.alwaysExportCompressed}
+                              </button>
+                            </div>
+                          </div>
+
+                          {showSvgControls ? (
+                            <div className="control-subsection">
+                              <label className="control-label">{copy.svgProfileLabel}</label>
+                              <div className="toggle-surface grid grid-cols-2 gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setImageSettings((current) => ({
+                                      ...current,
+                                      svg: { ...current.svg, preset: "safe" },
+                                    }))
+                                  }
+                                  className={optionClass(imageSettings.svg.preset === "safe")}
+                                >
+                                  {copy.settings.safe}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setImageSettings((current) => ({
+                                      ...current,
+                                      svg: { ...current.svg, preset: "advanced" },
+                                    }))
+                                  }
+                                  className={optionClass(imageSettings.svg.preset === "advanced")}
+                                >
+                                  {copy.settings.advanced}
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="control-block control-block--tight">
+                      <label className="output-format-label">{copy.compressionPresetLabel}</label>
+                      <div className="toggle-surface grid grid-cols-3 gap-1">
+                        {PRESETS.map((preset) => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => setPdfSettings((current) => ({ ...current, preset }))}
+                            className={optionClass(pdfSettings.preset === preset)}
+                          >
+                            {presetLabel(locale, preset)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="control-section">
+                      <div className="control-group-head control-group-head--native">
+                        <p className="output-format-label">{copy.jpegPageQualityLabel}</p>
+                      </div>
+
+                      <div className="control-subsection">
+                        <div className="quality-heading">
+                          <label className="output-format-label">{copy.rasterDpiLabel}</label>
+                          <span className="quality-value">{pdfSettings.dpi}</span>
+                        </div>
+                        <div className="quality-range-shell">
+                          <div className="quality-range-track" />
+                          <div className="quality-range-fill" style={{ width: getRangePercent(pdfSettings.dpi, 96, 180) }} />
+                          <input
+                            type="range"
+                            min="96"
+                            max="180"
+                            step="4"
+                            value={pdfSettings.dpi}
+                            onChange={(event) => setPdfSettings((current) => ({ ...current, dpi: parseInt(event.target.value, 10) }))}
+                            className="range-input"
+                          />
+                          <div
+                            className="quality-range-thumb"
+                            style={{ left: `calc(${getRangePercent(pdfSettings.dpi, 96, 180)} - 0.5rem)` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="control-subsection">
+                        <div className="quality-heading">
+                          <label className="output-format-label">{copy.jpegPageQualityLabel}</label>
+                          <span className="quality-value">{Math.round(pdfSettings.jpegQuality * 100)}%</span>
+                        </div>
+                        <div className="quality-range-shell">
+                          <div className="quality-range-track" />
+                          <div
+                            className="quality-range-fill"
+                            style={{ width: getRangePercent(Math.round(pdfSettings.jpegQuality * 100), 45, 88) }}
+                          />
+                          <input
+                            type="range"
+                            min="45"
+                            max="88"
+                            value={Math.round(pdfSettings.jpegQuality * 100)}
+                            onChange={(event) =>
+                              setPdfSettings((current) => ({ ...current, jpegQuality: parseInt(event.target.value, 10) / 100 }))
+                            }
+                            className="range-input"
+                          />
+                          <div
+                            className="quality-range-thumb"
+                            style={{ left: `calc(${getRangePercent(Math.round(pdfSettings.jpegQuality * 100), 45, 88)} - 0.5rem)` }}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="control-subsection">
+                        <div className="quality-heading">
+                          <label className="output-format-label">{copy.pngThresholdLabel}</label>
+                          <span className="quality-value">{pdfSettings.pngColorThreshold}</span>
+                        </div>
+                        <div className="quality-range-shell">
+                          <div className="quality-range-track" />
+                          <div
+                            className="quality-range-fill"
+                            style={{ width: getRangePercent(pdfSettings.pngColorThreshold, 16, 96) }}
+                          />
+                          <input
+                            type="range"
+                            min="16"
+                            max="96"
+                            step="4"
+                            value={pdfSettings.pngColorThreshold}
+                            onChange={(event) =>
+                              setPdfSettings((current) => ({
+                                ...current,
+                                pngColorThreshold: parseInt(event.target.value, 10),
+                              }))
+                            }
+                            className="range-input"
+                          />
+                          <div
+                            className="quality-range-thumb"
+                            style={{ left: `calc(${getRangePercent(pdfSettings.pngColorThreshold, 16, 96)} - 0.5rem)` }}
+                          />
+                        </div>
+                        <p className="compact-note compact-note--tight">{copy.pngThresholdHint}</p>
+                      </div>
+                    </div>
+                  </>
+                )}
+
+                <div className="control-section control-section--actions">
+                  <div className="action-stack">
+                    <button
+                      type="button"
+                      onClick={() => void compressQueue(activeWorkspace)}
+                      disabled={!activeFiles.length || runtime[activeWorkspace].isProcessing}
+                      className="primary-button"
+                    >
+                      {runtime[activeWorkspace].isProcessing ? <Loader2 className="smooth-spin h-4 w-4" /> : <Archive className="h-4 w-4" />}
+                      {primaryActionLabel}
+                    </button>
+
+                    {completedFiles.length ? (
+                      <button type="button" onClick={() => void downloadZip(activeWorkspace)} className="secondary-button">
+                        <Download className="h-4 w-4" />
+                        {copy.downloadZipLabel}
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+
+              </div>
+            </section>
+
+            <section className="surface-card config-credits-panel">
+              <div className="control-group-head control-group-head--native config-credits-panel__head">
+                <p className="output-format-label">{copy.creditsLabel}</p>
+              </div>
+              <p className="compact-note compact-note--tight config-credits__note">{copy.creditsNote}</p>
+              <div className="config-credits__grid" aria-label={copy.creditsLabel}>
+                {["MozJPEG", "OxiPNG", "UPNG.js", "SVGO", "pdf.js", "pdf-lib"].map((name) => (
+                  <span key={name} className="config-credits__chip">
+                    {name}
+                  </span>
                 ))}
               </div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-300">
-                BMP / TIFF selections export as PNG in the browser.
-              </p>
-            </div>
+            </section>
+          </aside>
+        </main>
 
-            <div className="space-y-8">
-              <div className="flex items-center justify-between">
-                <label className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-300">
-                  Quality
-                </label>
-                <span className="font-bold text-sm text-zinc-900">{quality}%</span>
-              </div>
-              <div className="relative w-full h-6 flex items-center">
-                <input
-                  type="range"
-                  min="35"
-                  max="95"
-                  value={quality}
-                  onChange={(event) => setQuality(parseInt(event.target.value, 10))}
-                  className="w-full"
-                />
-              </div>
-              <p className="text-[10px] font-bold uppercase tracking-widest text-zinc-300">
-                For PDFs this also tunes raster DPI and JPEG quality.
-              </p>
-            </div>
-
-            <div className="space-y-5">
-              <label className="text-[10px] font-bold uppercase tracking-[0.2em] text-zinc-300">
-                Bulk Actions
-              </label>
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  onClick={() => void downloadZip("images")}
-                  disabled={!completedImages.length}
-                  className="flex flex-col items-center gap-3 p-4 bg-zinc-50 hover:bg-zinc-100 rounded-2xl transition-all disabled:opacity-30 group"
-                >
-                  <ImageIcon className="w-5 h-5 text-zinc-400 group-hover:text-zinc-900 transition-colors" />
-                  <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-400 group-hover:text-zinc-900">
-                    Images ZIP
-                  </span>
-                </button>
-                <button
-                  onClick={() => void downloadZip("pdfs")}
-                  disabled={!completedPdfs.length}
-                  className="flex flex-col items-center gap-3 p-4 bg-zinc-50 hover:bg-zinc-100 rounded-2xl transition-all disabled:opacity-30 group"
-                >
-                  <FileText className="w-5 h-5 text-zinc-400 group-hover:text-zinc-900 transition-colors" />
-                  <span className="text-[9px] font-bold uppercase tracking-widest text-zinc-400 group-hover:text-zinc-900">
-                    PDFs ZIP
-                  </span>
-                </button>
-              </div>
-            </div>
-
-            <div className="pt-6 space-y-4">
-              <button
-                onClick={() => void compressQueue()}
-                disabled={files.length === 0 || isProcessing}
-                className="w-full bg-zinc-900 hover:bg-zinc-800 disabled:bg-zinc-100 disabled:text-zinc-300 text-white py-5 rounded-2xl font-bold text-[10px] tracking-[0.2em] uppercase transition-all flex items-center justify-center gap-3 shadow-lg shadow-zinc-200"
-              >
-                {isProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
-                {isProcessing ? "Processing..." : "Compress All"}
-              </button>
-
-              {completedFiles.length ? (
-                <button
-                  onClick={() => void downloadZip("all")}
-                  className="w-full bg-zinc-50 hover:bg-zinc-100 text-zinc-900 py-5 rounded-2xl font-bold text-[10px] tracking-[0.2em] uppercase transition-all flex items-center justify-center gap-3"
-                >
-                  <Download className="w-4 h-4" />
-                  Download All ZIP
-                </button>
-              ) : null}
-
-              <button
-                onClick={clearQueue}
-                className="w-full py-2 text-[10px] font-bold tracking-[0.2em] uppercase text-zinc-300 hover:text-zinc-400 transition-colors flex items-center justify-center gap-2"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Clear Queue
-              </button>
-            </div>
-          </div>
-        </aside>
-      </main>
+        <div className={completedFiles.length ? "mobile-fab-bar mobile-fab-bar--with-download" : "mobile-fab-bar"}>
+          <button type="button" className="mobile-fab-bar__settings" onClick={scrollToSettings}>
+            <Settings2 className="h-4 w-4" />
+            {settingsLabel}
+          </button>
+          {completedFiles.length ? (
+            <button type="button" className="mobile-fab-bar__secondary" onClick={() => void downloadZip(activeWorkspace)}>
+              <Download className="h-4 w-4" />
+              {copy.downloadZipLabel}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void compressQueue(activeWorkspace)}
+            disabled={!activeFiles.length || runtime[activeWorkspace].isProcessing}
+            className="mobile-fab-bar__primary"
+          >
+            {runtime[activeWorkspace].isProcessing ? <Loader2 className="smooth-spin h-4 w-4" /> : <Archive className="h-4 w-4" />}
+            {primaryActionLabel}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

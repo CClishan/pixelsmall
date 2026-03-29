@@ -33,3 +33,16 @@ export function formatTimestamp(value = Date.now()) {
 export function sanitizeFileName(value: string) {
   return value.replace(/[^\w.-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 }
+
+export function formatDuration(durationMs: number) {
+  if (durationMs < 1000) {
+    return `${Math.round(durationMs)}ms`;
+  }
+
+  const seconds = durationMs / 1000;
+  if (seconds < 60) {
+    return `${seconds.toFixed(1)}s`;
+  }
+
+  return `${(seconds / 60).toFixed(1)}m`;
+}
