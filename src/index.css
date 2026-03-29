@@ -417,6 +417,8 @@
     position: relative;
     z-index: 1;
     display: flex;
+    width: 100%;
+    min-width: 0;
     min-height: auto;
     flex-direction: column;
     align-items: center;
@@ -468,6 +470,7 @@
 
   .dropzone-content--compact .dropzone-title {
     flex: 1;
+    min-width: 0;
     max-width: none;
     color: rgb(115 115 115);
     font-size: 0.8125rem;
@@ -495,6 +498,7 @@
 
   .dropzone-hint--compact {
     margin-left: auto;
+    min-width: 0;
     white-space: nowrap;
   }
 
@@ -588,6 +592,8 @@
   }
 
   .queue-shell {
+    width: 100%;
+    min-width: 0;
     border-color: var(--panel-border);
     background: rgb(255 255 255);
     border-radius: 1rem;
@@ -598,6 +604,8 @@
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
+    width: 100%;
+    min-width: 0;
     gap: 1rem;
     padding: 1rem 1.5rem;
     border-bottom: 1px solid rgb(245 245 245);
@@ -607,6 +615,7 @@
   .queue-header__copy {
     display: grid;
     gap: 0.55rem;
+    min-width: 0;
   }
 
   .queue-header__title-row {
@@ -626,6 +635,7 @@
     display: flex;
     align-items: center;
     gap: 0.7rem;
+    min-width: 0;
   }
 
   .queue-count-chip {
@@ -683,6 +693,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    width: 100%;
+    min-width: 0;
     gap: 1rem;
     min-height: 5rem;
     padding: 0.875rem 1.5rem;
@@ -736,6 +748,7 @@
   .queue-meta {
     display: flex;
     flex-wrap: wrap;
+    min-width: 0;
     gap: 0.35rem;
     align-items: center;
     min-height: 0.75rem;
@@ -1460,7 +1473,27 @@
 
   @media (max-width: 767px) {
     .app-frame {
-      padding-bottom: 7.5rem;
+      overflow-x: clip;
+      padding: 1rem 1rem 7.5rem;
+    }
+
+    .app-shell {
+      min-width: 0;
+    }
+
+    .workspace-main,
+    .workspace-aside,
+    .dropzone-surface,
+    .upload-guide,
+    .upload-guide__grid,
+    .upload-guide__item,
+    .queue-shell,
+    .queue-body,
+    .config-panel,
+    .config-credits-panel {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
     }
 
     .page-header {
@@ -1476,6 +1509,7 @@
     }
 
     .page-header__controls {
+      min-width: 0;
       flex-shrink: 0;
       gap: 0.35rem;
     }
@@ -1489,16 +1523,23 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
+      min-width: 0;
       gap: 0.6rem;
       padding: 0.8rem 0.9rem;
     }
 
     .upload-guide__item--compact-mobile .section-kicker {
+      min-width: 0;
+      max-width: 42%;
       flex-shrink: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
     }
 
     .upload-guide__item--compact-mobile .upload-guide__body--tag {
       margin-left: auto;
+      min-width: 0;
       max-width: 65%;
       overflow: hidden;
       white-space: nowrap;
@@ -1517,16 +1558,24 @@
     }
 
     .dropzone-content--compact {
+      width: 100%;
+      min-width: 0;
       gap: 0.55rem;
     }
 
     .dropzone-content--compact .dropzone-title {
+      min-width: 0;
       font-size: 0.75rem;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
     }
 
     .dropzone-hint--compact {
-      max-width: 42%;
+      max-width: 38%;
+      min-width: 0;
       overflow: hidden;
+      white-space: nowrap;
       text-overflow: ellipsis;
     }
 
@@ -1624,7 +1673,8 @@
     }
 
     .queue-row {
-      flex-direction: row;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
       align-items: center;
       gap: 0.75rem;
       padding: 0.875rem 1rem;
@@ -1632,6 +1682,7 @@
 
     .queue-actions {
       width: auto;
+      min-width: 0;
       justify-content: flex-end;
       padding-top: 0;
       min-height: 0;
@@ -1639,6 +1690,7 @@
     }
 
     .queue-row__main {
+      min-width: 0;
       gap: 0.75rem;
     }
 
@@ -1649,10 +1701,16 @@
 
     .queue-copy {
       gap: 0.18rem;
+      min-width: 0;
     }
 
     .queue-file-name {
       font-size: 11px;
+    }
+
+    .queue-meta {
+      max-width: 100%;
+      overflow: hidden;
     }
 
     .queue-status-cluster {
