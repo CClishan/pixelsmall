@@ -42,6 +42,22 @@ PixelSmall 是一个纯浏览器端的图片与扫描 PDF 压缩工具。
 | `src/index.css` | 当前 native 对齐样式 |
 | `archive/next-prototype/` | 历史归档，不参与当前构建 |
 
+## 设计与复用文档
+
+| 文件 | 作用 |
+|---|---|
+| `DESIGN.md` | 这条工具家族的设计语言、组件气质、视觉禁忌和复用规则 |
+| `TOOL_SCHEMA.md` | 新工具如何复用 header / drop / queue / settings / mobile actions 的工程接入约定 |
+
+这两份文档现在已经明确包含：
+
+- 页面网格结构
+- 主容器宽度
+- spacing scale
+- 卡片 padding
+- 控件高度与圆角层级
+- 响应式间距策略
+
 ## 开源致谢
 
 - `@jsquash/jpeg`
@@ -81,4 +97,3 @@ npm run build
 | Build command | `npm run build` |
 | Output directory | `dist` |
 | Environment variables | 无 |
-
